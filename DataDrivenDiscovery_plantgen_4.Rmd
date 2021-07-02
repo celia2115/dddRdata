@@ -1,0 +1,367 @@
+---
+title: "Assignment 4"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(janitor)
+library(readxl)
+library(Rtsne)
+```
+
+Load the libraries 'tidyverse', 'janitor', and 'readxl'. Then, load the data.
+```{r datareading}
+metabolic_data <- readxl::read_xlsx('Assignment 2. Analysis of the Solanum chmielewskii IL population.xlsx',
+                                    sheet = 'Metabolic data W&A',
+                                    skip = 7,
+                                    .name_repair = make_clean_names)
+
+```
+
+We need to change the column names of some of the columns.
+
+```{r}
+names(metabolic_data)[1:8] <- c("peak", "scan_nr", "ret_min", "mass_mz", 
+                                "sample_id", "annotation_level", "final_id",
+                                "elemental_formula")
+
+
+metabolic_data <- metabolic_data[-c(1, 2),] #remove the first two rows
+```
+
+Select only the first 25 metabolites.
+
+```{r}
+first_25 <- metabolic_data[1:25, ]
+```
+
+Make a scatterplot of quercetin rutinocide versus its isotope.
+
+```{r}
+
+quercetin <- paste(first_25[22, -(1:11)])
+quercetin_isotope <- paste(first_25[23, -(1:11)])
+
+df_quercetin <- tibble(quercetin = as.numeric(quercetin),
+                      quercetin_isotope = as.numeric(quercetin_isotope))
+
+ggplot(data=df_quercetin, aes(quercetin, quercetin_isotope)) +
+  geom_point(alpha=0.5) +
+  xlim(0, 8000) +
+  ylim(0, 8000) +
+  labs(x = "Quercetin values",
+       y = "Quercetin isotope values")
+  
+
+```
+
+
+Following code might not be used anymore, so i commented it out
+```{r}
+#UNNECCESSARY PROBABLY
+
+# a_grouped <- first_25 %>% 
+#   select(a_01a1:a_12d3) %>% 
+#   pivot_longer(cols=everything(),
+#                names_to = "individual_lines",
+#                values_to = "expression") %>% 
+#   mutate(il = stringr::str_extract(individual_lines, "^.{4}")) %>%
+#   select(!individual_lines) %>%
+#   pivot_wider(names_from = il,
+#               values_from = expression) %>%
+#   pivot_longer(cols=everything(),
+#                names_to = "ID",
+#                values_to = "value") %>% 
+#   mutate(value = purrr::map(value, `length<-`, max(lengths(value)))) %>% #Magic line that adds NA to vectors to make them equal lengths
+#   pivot_wider(names_from = "ID",
+#               values_from = "value") %>% 
+#   unnest(cols=everything())
+```
+
+Write a function to pivot a single metabolite row to a long format, for a single anova.
+
+
+```{r}
+longmaker <- function(data, colrange, rownumber){
+  dplyr::select(data, {{colrange}}) %>% #double accolades for tidy selection
+  dplyr::slice(rownumber) %>% 
+  tidyr::pivot_longer(cols=everything(),
+                      names_to = "individual_lines",
+                      values_to = "expression") %>% 
+  dplyr::mutate(il = dplyr::if_else(
+    stringr::str_sub(individual_lines, start=3, end = 3) == "m", #IF
+    stringr::str_extract(individual_lines, "^.{3}"), #if it's true
+    stringr::str_extract(individual_lines, "^.{4}") #if it's false
+    ))
+}
+```
+
+a_01a1:a_12d3
+Then, use the forloop to calculate the pvalues for each metabolite
+
+
+
+```{r}
+a_pvalue_results <- sapply(1:nrow(first_25), function(response){
+  row_long <- longmaker(first_25, a_01a1:a_12d3, response)
+  row_summary <-  anova(aov(expression ~ il, data = row_long))
+  row_summary$`Pr(>F)`[1]
+})
+
+a_pvalue_results
+```
+Now do the same for the W column
+```{r}
+w_pvalue_results <- sapply(1:nrow(first_25), function(response){
+  row_long <- longmaker(first_25, w_01a1:w_12d3, response)
+  row_summary <-  anova(aov(expression ~ il, data = row_long))
+  row_summary$`Pr(>F)`[1]
+})
+
+w_pvalue_results
+```
+
+Display the results inside a dataframe and do some corrections. You'll have to combine the pvalues first, in order for corrections to work out right. Now there are 50 pvalues, corrected once, instead of 2 times 25 pvalue corrections.
+
+```{r}
+pvalues_combined <- c(a_pvalue_results, w_pvalue_results)
+pvalues_corrected <- p.adjust(pvalues_combined, method="holm")
+
+metabolites_tested <- tibble(metabolites = first_25$final_id,
+                             a_pvalues = a_pvalue_results,
+                             w_pvalues = w_pvalue_results,
+                             a_corrected = pvalues_corrected[1:25],
+                             w_corrected = pvalues_corrected[26:50],
+                             a_accepted = if_else(a_corrected < 0.05, TRUE, FALSE),
+                             w_accepted = if_else(w_corrected < 0.05, TRUE, FALSE))
+
+metabolites_tested
+```
+
+```{r}
+metabolites_tested$metabolites[metabolites_tested$a_accepted == TRUE & metabolites_tested$w_accepted == TRUE]
+```
+```{r}
+question5_df <- metabolites_tested %>%
+  filter(a_pvalues <= 0.05 & w_pvalues <= 0.05) %>%
+  mutate(combined = a_pvalues + w_pvalues) %>%
+  arrange(combined) %>%
+  select(metabolites, a_pvalues, w_pvalues)
+question5_df
+write.csv(question5_df, "question5df.csv")
+```
+
+```{r}
+pivot_25 <- first_25 %>% 
+  select(final_id, a_01a1:w_contr5) %>% 
+  pivot_longer(cols = !final_id,
+               names_to = "individual_lines",
+               values_to = "expression") %>% 
+  mutate(il = if_else(
+    str_sub(individual_lines, start=3, end = 3) == "m", #IF
+    str_extract(individual_lines, "^.{3}"), #if it's true
+    str_extract(individual_lines, "^.{4}") #if it's false
+    ))
+```
+
+
+```{r}
+
+per_met_a_ttest <- sapply(1:25, function(i){
+  row_long <- longmaker(first_25, 
+                        colrange=a_01a1:a_m3,
+                        rownumber = i)
+  metabolite_m <- row_long$expression[row_long$il == "a_m"]
+  
+  result <- row_long %>% 
+    filter(substr(il, 1, 1) == "a") %>% 
+    group_by(il) %>% 
+    summarize(ttest = t.test(expression, metabolite_m, 
+                             alternative = "two.sided",
+                             var.equal = FALSE)$`p.value`) %>% 
+    select(ttest) %>% 
+    slice(-13)
+  result
+})  
+
+```
+
+
+```{r}
+per_met_w_ttest <- sapply(1:25, function(i){
+  row_long <- longmaker(first_25, 
+                        colrange=w_01a1:w_m3,
+                        rownumber = i)
+  metabolite_m <- row_long$expression[row_long$il == "w_m"]
+  
+  result <- row_long %>% 
+    filter(substr(il, 1, 1) == "w") %>% 
+    group_by(il) %>% 
+    summarize(ttest = t.test(expression, metabolite_m, 
+                             alternative = "two.sided",
+                             var.equal = FALSE)$`p.value`) %>% 
+    select(ttest) %>% 
+    slice(-13)
+  result
+})  
+```
+
+
+```{r}
+unlisted_a <- unlist(per_met_a_ttest, use.names = FALSE)
+unlisted_w <- unlist(per_met_w_ttest, use.names = FALSE)
+
+ttests_combined <- c(unlisted_a, unlisted_w)
+ttests_corrected <- p.adjust(ttests_combined, method = "holm")
+
+```
+
+
+
+```{r}
+question6_df <- tibble(metabolites = rep(first_25$final_id, each = 12),
+                       line = rep(paste(rep("_", 12), 1:12), each=25) ,
+                       a_combined = ttests_combined[1:300],
+                       w_combined = ttests_combined[301:600]
+                       )
+```
+
+
+```{r}
+question6_df %>% 
+  filter(a_combined < 0.05 & w_combined < 0.05) 
+
+```
+write.csv(question6_df, "question6df.csv")
+Prep for pca.
+
+```{r}
+metabolite_columns <- pivot_25 %>% 
+  pivot_wider(names_from = final_id,
+              values_from = expression) %>% 
+  select(-c(individual_lines, il))
+```
+
+
+```{r}
+pca_res <- prcomp(metabolite_columns, center = TRUE, scale. = TRUE)
+```
+
+
+```{r}
+pca_scores <- pca_res$x
+```
+
+```{r}
+plot(pca_scores[,1:2], pch=21,    main="Metabolite data Scores")
+```
+
+```{r}
+dist_eu <- philentropy::distance(metabolite_columns, method = "euclidean")
+dist_eu_pca <- philentropy::distance(pca_scores[,1:2], method = "euclidean")
+```
+
+```{r}
+d_data <- as.vector(dist_eu[upper.tri(dist_eu, diag = FALSE)])
+d_pca <- as.vector(dist_eu_pca[upper.tri(dist_eu_pca, diag = FALSE)])
+
+plot(d_data, d_pca, xlab = 'Distance in data space', ylab = 'Distance in PCA space' )
+```
+
+```{r}
+ssw.data = NULL
+ssw.pca = NULL
+K = 20
+for(k in 1 : K){
+#km.res = kmeans(PCAscores[,1:2], k, iter.max = 25, nstart = 25)
+#Clustering on original data
+  km.res.data = kmeans(metabolite_columns, k, iter.max = 25, nstart = 25)
+  ssw.data =  append(ssw.data, km.res.data$tot.withinss)
+#Clustering on PCA scores
+  km.res.pca = kmeans(pca_scores[,1:2], k, iter.max = 25, nstart = 25)
+  ssw.pca =  append(ssw.pca, km.res.pca$tot.withinss)
+}
+
+```
+
+```{r}
+plot(1:K, ssw.data, xlab= 'Number of clusters', ylab = 'Total within SS',main = 'Clustering on original data space')
+plot(1:K, ssw.pca, xlab= 'Number of clusters', ylab = 'Total within SS',main = 'Clustering on 2-D PCA space')
+
+```
+
+
+
+```{r}
+km.res.pca = kmeans(pca_scores[,1:2], 4, iter.max = 25, nstart = 25)
+cluster.id = km.res.pca$cluster
+#Do pca 
+pca.res <- prcomp(metabolite_columns, center = TRUE, scale. = TRUE)
+PCAscores <- pca.res$x
+#Plot PCA 
+plot(PCAscores[,1:2], pch=21, col = cluster.id, main="Clusters from K-means clustering")
+
+```
+
+
+
+
+```{r}
+res.tsne = Rtsne::Rtsne(metabolite_columns, perplexity = 1)
+
+plot(res.tsne$Y, col = cluster.id)
+
+```
+
+
+```{r}
+res.tsne = Rtsne::Rtsne(metabolite_columns, perplexity = 2)
+
+plot(res.tsne$Y, col = cluster.id)
+```
+
+
+
+
+```{r}
+res.tsne = Rtsne::Rtsne(metabolite_columns, perplexity = 5)
+
+plot(res.tsne$Y, col = cluster.id)
+```
+
+```{r}
+res.tsne = Rtsne::Rtsne(metabolite_columns, perplexity = 10)
+
+plot(res.tsne$Y, col = cluster.id)
+```
+
+
+```{r}
+res.tsne = Rtsne::Rtsne(metabolite_columns, perplexity = 25)
+
+plot(res.tsne$Y, col = cluster.id)
+```
+
+
+
+```{r}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

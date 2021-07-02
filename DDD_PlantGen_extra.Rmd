@@ -1,0 +1,210 @@
+---
+title: "DDD_PlantGen_extra"
+author: "Timo"
+date: "19/06/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+First, load the necessary libraries. Tidyverse for data manipulation and plotting, janitor for cleaning up the column names, tidytext for some minor text reordering and recipes (part of tidymodels) for modeling the data. PCA and UMAP adapted from Julia Silge's tutorial: https://juliasilge.com/blog/cocktail-recipes-umap/
+
+```{r message=FALSE}
+library(tidyverse)
+library(janitor)
+library(recipes)
+library(tidytext)
+library(readxl)
+```
+Load the data, using the readxl library.
+```{r datareading}
+metabolic_data <- readxl::read_xlsx('Assignment 2. Analysis of the Solanum chmielewskii IL population.xlsx',
+                                    sheet = 'Metabolic data W&A',
+                                    skip = 7,
+                                    .name_repair = make_clean_names)
+
+```
+
+We need to change the column names of some of the columns.
+
+```{r}
+names(metabolic_data)[1:8] <- c("peak", "scan_nr", "ret_min", "mass_mz", 
+                                "sample_id", "annotation_level", "final_id",
+                                "elemental_formula")
+
+
+metabolic_data <- metabolic_data[-c(1, 2),] #remove the first two rows
+```
+
+Select only the first 25 metabolites.
+
+```{r}
+first_25 <- metabolic_data[1:25, ]
+```
+
+Transform the data to a long pivoted format, and then into a wide format again. Each column is now a metabolite.
+```{r}
+metabolite_wide <- first_25 %>% 
+  select(final_id, a_01a1:w_contr5) %>% 
+  pivot_longer(cols = !final_id,
+               names_to = "individual_lines",
+               values_to = "expression") %>% 
+  mutate(il = if_else(
+    str_sub(individual_lines, start=3, end = 3) == "m", #IF
+    str_extract(individual_lines, "^.{3}"), #if it's true
+    str_extract(individual_lines, "^.{5}") #if it's false
+    )) %>% 
+    mutate(location = as_factor(ifelse(substr(il, 1, 1) == "a", "Avignon", "Wageningen")),
+           il = as_factor(il)) %>% 
+  pivot_wider(names_from = final_id,
+              values_from = expression)
+```
+
+
+Start up a recipe from the tidymodels package.
+```{r}
+pca_rec <- recipes::recipe(~ ., data=metabolite_wide) %>% 
+  update_role(il, location, new_role = "grouping factor") %>% 
+  update_role(individual_lines, new_role = "id") %>% 
+  step_normalize(all_predictors()) %>% 
+  step_pca(all_predictors())
+
+pca_prep <- recipes::prep(pca_rec)
+```
+First, a scree plot to show the percentage of variance explained. This can be used to assess the quality of the PCA.
+
+```{r}
+pca_sdev <-  pca_prep$steps[[2]]$res$sdev
+
+percent_variation <- pca_sdev^2 / sum(pca_sdev^2)
+
+var_df <- tibble(PC=paste0("PC",1:10),
+                 var_explained = percent_variation[1:10])
+
+var_df %>%
+  mutate(PC = fct_inorder(PC)) %>%
+  ggplot(aes(x=PC,y=var_explained, group = 1)) +
+  geom_point(size = 4) +
+  geom_line() +
+  labs(title = "Scree plot of PCA on metabolite data")
+```
+
+
+
+```{r}
+tidied_pca <- tidy(pca_prep, 2)
+```
+
+Now, we make a plot with the first 4 principal components, and show how much each metabolite contributes to the component. Create a variable called "type" which holds the metabolic pathway that each metabolite is in. It has to be of the same length as the 4 components in total, so it's replicated 4 times. If showing 5 components, then it needs to be replicated 5 times. This "type" variable will be used to color the metabolites in the plot.
+```{r}
+
+tidied_pca %>% 
+  filter(component %in% paste0("PC", 1:4)) %>% 
+  mutate(type = rep(first_25$biochemical_pathway, times=4)) %>% 
+  mutate(component = forcats::fct_inorder(component)) %>% 
+  ggplot(aes(value, terms, fill = type)) + 
+  geom_col(show.legend = TRUE) +
+  facet_wrap(~component, nrow = 1) +
+  labs(y=NULL)
+```
+Take a look at the first 4 components. Plot the top metabolites, and look at wether the contributions to the principal components is positive or negative. Sort the metabolites by the absolute value of their contribution.
+
+```{r}
+tidied_pca %>% 
+  filter(component %in% paste0("PC", 1:4)) %>% 
+  group_by(component) %>% 
+  slice_max(n = 8, abs(value)) %>% 
+  ungroup() %>% 
+  mutate(terms = tidytext::reorder_within(terms, abs(value), component)) %>% 
+  ggplot(aes(abs(value), terms, fill = value > 0)) +
+  geom_col() +
+  tidytext::scale_y_reordered() +
+  facet_wrap(~component, scales = "free_y") +
+  labs(y = NULL, fill = "Positive?")
+```
+
+
+Next, we do the same, but we color the metabolites by their biochemical pathway.
+
+```{r}
+tidied_pca %>% 
+  filter(component %in% paste0("PC", 1:4)) %>% 
+  mutate(type = rep(first_25$biochemical_pathway, times=4)) %>% 
+  group_by(component) %>% 
+  slice_max(n = 8, abs(value)) %>% 
+  ungroup() %>% 
+  mutate(terms = tidytext::reorder_within(terms, abs(value), component)) %>% 
+  ggplot(aes(abs(value), terms, fill = type)) +
+  geom_col() +
+  tidytext::scale_y_reordered() +
+  facet_wrap(~component, scales = "free_y") +
+  labs(y = NULL, fill = "Type")
+```
+
+Now we plot the first two components against each other, and the points in the scatterplot represent the original data points. Let's color the points by their location (Avignon versus Wageningen).
+```{r}
+recipes::bake(pca_prep, new_data = NULL) %>%
+  ggplot(aes(PC1, PC2, label = il)) +
+  geom_point(aes(color = location), alpha = 0.7, size = 2) +
+  geom_text(check_overlap = TRUE, hjust = "inward") +
+  labs(color = NULL)
+```
+
+There seems to be some clustering: the Avignon data points seem different from the Wageningen data points.
+Let's check this by using a different approach: a UMAP. Load the library "embed".
+
+
+
+```{r message = FALSE}
+library(embed)
+
+```
+The recipe for the UMAP can be copied almost exactly from the PCA, but we use step_umap instead of step_pca.
+
+```{r}
+umap_rec <- pca_rec <- recipes::recipe(~ ., data=metabolite_wide) %>% 
+  update_role(il, location, new_role = "grouping factor") %>% 
+  update_role(individual_lines, new_role = "id") %>% 
+  step_normalize(all_predictors()) %>% 
+  embed::step_umap(all_predictors())
+
+umap_prep <- prep(umap_rec)
+
+```
+
+Plot the first 2 dimensions that come out of the UMAP algorithm. Color them by location, again.
+```{r}
+recipes::bake(umap_prep, new_data = NULL) %>%
+  ggplot(aes(umap_1, umap_2, label = il)) +
+  geom_point(aes(color = location), alpha = 0.7, size = 2) +
+  geom_text(check_overlap = TRUE, hjust = "inward") +
+  labs(color = NULL)
+```
+
+
+This clearly shows a difference between the Wageningen data and the Avignon data. It is worht noting that the control data for Avignon is in the cluster on the right, with the Wageningen data.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

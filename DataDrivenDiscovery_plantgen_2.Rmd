@@ -1,0 +1,233 @@
+---
+title: "Untitled"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(readxl)
+library(janitor)
+```
+We load the libraries tidyverse and readxl, as well as janitor. First, read the data (both the metabolite concentration and the metabolic library).
+
+```{r datareading}
+metabolites <- readxl::read_xlsx('Assignment 1. Finding the gene that makes tomatoes pink.xlsx',
+                         sheet = 'Metabolic data',
+                         skip = 1,
+                        .name_repair = make_clean_names)
+
+
+metabolic_library <- readxl::read_xlsx('Assignment 1. Finding the gene that makes tomatoes pink.xlsx',
+                         sheet = 'Metabolic Library',
+                        .name_repair = make_clean_names)
+```
+
+
+
+Remove the first row, containing colors for the wildtype and ILs. Save this color data for possible later use. Convert the metabolite data into numeric if necessary.
+
+```{r}
+metabolites <- metabolites %>% 
+  dplyr::slice(-1) %>% 
+  mutate(across(wt_1:il01b_3, as.numeric),
+         across(5:8, as.numeric))
+
+```
+
+```{r}
+colordf <- tribble(
+  ~type, ~colors,
+  "wt1", "Red",
+  "wt2", "Red",
+  "wt3", "Red",
+  "il01b_1", "Pink",
+  "il01b_2", "Pink",
+  "il01b_3", "Pink"
+)
+```
+
+Compute averages and standard deviations of WT and IL01b
+```{r}
+metabolites <- metabolites %>% 
+  rowwise() %>% 
+  mutate(average_wt = mean(c(wt_1, wt_2, wt_3)),
+         average_il01b = mean(c(il01b_1, il01b_2, il01b_3)),
+         sd_wt = sd(c(wt_1, wt_2, wt_3)),
+         sd_il01b = sd(c(il01b_1, il01b_2, il01b_3))) %>% 
+  ungroup()
+
+metabolites %>% 
+  select(peaks, average_wt, sd_wt, average_il01b, sd_il01b) %>% 
+  knitr::kable()
+```
+View the difference between the averages, and between the squared standard deviations (the variances).
+```{r}
+metabolites %>% 
+  transmute(avg_diff = average_wt - average_il01b,
+            variance_diff = sd_wt^2 - sd_il01b^2) %>% 
+  knitr::kable()
+```
+
+
+We can see that 9 out of 12 rows have a higher WT average than their IL01b average.
+We also see that the variances are not at all equal.
+For safety, we can do a two-sided t-test on the data, between the WT and IL01b.
+We check if the means are different, not if one is higher (or lower) than the other.
+
+```{r}
+ttestdata = NULL
+for(i in 1:12) {
+  x = as.vector(metabolites[i, 10:12])
+  y = as.vector(metabolites[i, 13:15])
+  singlettest = t.test(x, y, paired=FALSE, alternative = "two.sided")
+  ttestdata[i] = singlettest$p.value
+}
+metabolites$ttest_wt_vs_il01b = ttestdata
+```
+
+We make a column with TRUE if the p-value of the t-test < 0.05, and FALSE if not.
+```{r}
+metabolites <- metabolites %>% 
+  mutate(ttest_accepted = if_else(ttest_wt_vs_il01b < 0.05,
+                                  TRUE, FALSE))
+metabolites$ttest_accepted
+```
+
+So we see that the only one that's different, significantly, is the last one.
+Now, calculate neutral masses for the metabolites.
+
+```{r}
+metabolites <- metabolites %>% 
+  mutate(neutral_mass = negative_mass_m_h + 1.007825)
+
+```
+
+Find the metabolites with the closest retention time and closest mass. First, write a function to find the closest value.
+
+```{r}
+closest <- function(vec, value){
+  vec[which(abs(vec-value) == min(abs(vec-value)))]
+}
+```
+
+Then, calculate the closest retention times and masses.
+
+
+```{r}
+candidates_ret_time = NULL
+ret_time_library = as.vector(metabolic_library$library_retention_time)
+metabolite_names = as.vector(metabolic_library$metabolite_name)
+metabolites$closest_ret_times = rep(0, 12)
+
+for(i in 1:12){
+  #retention time first
+  closest_ret_time <- closest(ret_time_library, as.double(metabolites[i, 2]))
+  if (length(closest_ret_time) == 1) {
+    
+    metabolites[i, 5] = closest_ret_time #retention time library
+    metabolites[i, 7] = as.double(metabolites[i, 2]) - closest_ret_time  
+    metabolites$closest_ret_times = closest_ret_time
+    
+  }else{
+    closest_ret_time = closest_ret_time[1]
+    print(paste('This one had multiple results: peak', i ))
+    metabolites[i, 5] = closest_ret_time #retention time library
+    metabolites[i, 7] = as.double(metabolites[i, 2]) - closest_ret_time
+    metabolites$closest_ret_times = closest_ret_time
+  }
+  
+ #retention time deviation
+  ret_time_metabolite <- metabolic_library[ret_time_library == closest_ret_time, "metabolite_name"]
+  
+  candidates_ret_time[i] = ret_time_metabolite
+}
+```
+For the masses:
+```{r}
+candidates_mass = NULL
+mass_library = as.vector((metabolic_library$library_neutral_mass))
+metabolites$closest_masses = rep(0, 12)
+
+for(i in 1:12){  #Then, mass
+  closest_mass <- closest(mass_library, as.double(metabolites[i, 4]))
+  if(length(closest_mass) == 1){
+      metabolites[i, 8] = ((metabolites[i, 4] - closest_mass)/closest_mass) * 1000000
+      mass_metabolite <- metabolic_library[mass_library == closest_mass,
+                                           "metabolite_name"]
+      metabolites$closest_masses[i] = closest_mass
+      
+  }else{
+    closest_mass = closest_mass[1]
+    print(paste('This one had multiple results: peak', i ))
+    
+    metabolites[i, 8] = ((metabolites[i, 4] - closest_mass)/closest_mass) * 1000000
+    mass_metabolite <- metabolic_library[mass_library == closest_mass,
+                                         "metabolite_name"]
+    metabolites$closest_masses[i] = closest_mass
+  }
+
+
+  candidates_mass[i] = mass_metabolite
+}
+```
+
+
+Compare the lists of names. Use `View(met_names_compare)` to view the table, because the output is not displayed correctly in the console.
+```{r, results=FALSE}
+met_names_compare <- tibble(peaks = paste(rep(x= "Peak ", times=12), 1:12),
+                            ret_time_names = candidates_ret_time,
+                            mass_names = candidates_mass)
+met_names_compare
+```
+
+
+Lets visualize the data into a barplot, showing the average metabolite concentration.
+The error bars represent standard deviations.
+
+```{r}
+
+metabolites %>% 
+  filter(peaks == "Peak 12") %>% 
+  select(wt_1:il01b_3) %>% 
+  pivot_longer(cols = everything(),
+               names_to = "line",
+               values_to = "concentration") %>% 
+  mutate(type = as_factor(c(rep("WT", 3), rep("IL01b", 3)))) %>% 
+  group_by(type) %>% 
+  summarize(mean_concentration = mean(concentration),
+            st_dev = sd(concentration)) %>% 
+  ggplot(aes(x=type, y=mean_concentration))+
+  geom_col(fill='azure3', color='black') +  
+  labs(x = "", y = "Average concentration (Da)") +
+  facet_wrap(~type, scales='free') +
+  geom_errorbar(aes(ymin = (mean_concentration - st_dev), 
+                    ymax = (mean_concentration + st_dev)),
+                width = .5, position = 'dodge' ) + 
+  theme_gray()
+```
+ 
+
+```{r, results=FALSE}
+table1 <- metabolites %>% 
+  select(1:5, 7, 8, closest_ret_times, closest_masses) %>% 
+  left_join(met_names_compare, by='peaks',
+            copy=TRUE,
+            keep=FALSE)
+
+table1$ret_time_names = met_names_compare$ret_time_names
+table1$mass_names = met_names_compare$mass_names
+
+table1
+```
+And the second one contains the results of the t-tests.
+```{r}
+table2 <- metabolites %>% 
+  select(1, wt_1:ttest_accepted) %>% 
+  select(!c(percent_sd_wt, percent_sd_il01b))
+
+knitr::kable(table2, caption = "Table 2")  
+```
+
